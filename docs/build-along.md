@@ -1,121 +1,89 @@
-# Build Traffy Lakehouse, one component at a time
+# Build along: API → Cloud Storage → BigQuery SQL → Iceberg
 
-This is the authoring path for your own tutorial. Readers build and inspect each component
-before combining them. The finished application's `complaint-pipeline` CLI is optional
-convenience tooling after the lessons, not a prerequisite or a substitute for the code.
+Build a complaint observation pipeline one service at a time. You create the GCP resources
+and run each command yourself. Python captures API responses and verifies file integrity;
+**BigQuery SQL performs all record transformation, validation, deduplication, and aggregation**.
+Cloud Composer schedules the same steps after you have run them manually.
 
-All GCP project identifiers below are `project_name` placeholders. You run provisioning and
-deployment commands yourself. The guide does not assume the resources already exist.
+All examples use `project_name`. Replace it in your local configuration. Never put your real
+resource names or credentials into the tracked example files. If you followed the previous
+Dataflow tutorial, start with [the migration guide](migration-to-bigquery-sql.md).
 
-For each chapter, explain the problem, write or inspect the relevant code, execute that step,
-and show evidence of its output. Screenshots of actual results belong after execution; the
-checkpoints below describe what to capture for your article or video.
-
-| Chapter | What the reader builds | Evidence to show |
-| --- | --- | --- |
-| 1 | GCP project access, buckets, datasets, and identities | Resources in the chosen region |
-| 2 | A direct Python API request | Response structure and a few non-identifying fields |
-| 3 | Bounded extraction and Bronze upload | Saved responses, hashes, and committed manifest |
-| 4 | BigQuery connection and explicit table DDL | Staging and managed Iceberg tables |
-| 5 | Beam transformations and a Dataflow job | Graph, rejected rows, and staging count |
-| 6 | Quality gates, Silver MERGE, history, and Gold SQL | Publication receipt and sample reports |
-| 7 | Flex Template packaging | Container image and template specification |
-| 8 | Composer environment and DAG deployment | Three tasks completing in order |
-| 9 | Retry and failure demonstrations | Repeatable results and failed quality gates |
-
-## Pipeline diagram
-
-The diagram shows the complete workflow after Composer is added. Earlier chapters run the
-same stages manually. Solid arrows show processing and data dependencies; dotted arrows show
-orchestration.
+## What you will build
 
 ```mermaid
-flowchart TB
-    API["Traffy Fondue public API"]
-    EXTRACT["Python extractor<br/>Bounded pagination and checksums"]
-    COMPOSER["Cloud Composer / Airflow<br/>prepare → normalize → publish"]
-
-    subgraph RAW["Cloud Storage · project_name-raw"]
-        BRONZE["Bronze<br/>Original responses and committed manifest"]
-        QUARANTINE["Quarantine<br/>Rejected outcomes and reasons"]
-    end
-
-    BEAM["Dataflow / Apache Beam<br/>Verify pages, normalize and validate records"]
-    STAGING["Standard BigQuery staging<br/>Accepted and rejected outcomes"]
-
-    subgraph TRANSACTION["BigQuery publication · one transaction"]
-        GATES["Publication quality gates<br/>Deduplicate retries, reconcile counts,<br/>check policy and rejection threshold"]
-        CANDIDATES["Validated candidates<br/>One source version per ticket in this capture"]
-
-        subgraph SILVER["Silver · BigQuery-managed Iceberg"]
-            CURRENT["complaints_current<br/>MERGE newest source versions"]
-            HISTORY["complaint_observation_history<br/>Retain observations across captures"]
+flowchart LR
+    subgraph Composer["Cloud Composer · Orchestrates the entire pipeline"]
+        direction LR
+        subgraph SourceZone["1 · DATA SOURCE"]
+            direction TB
+            API["Traffy Fondue<br/>public API"] --> Extract["Python collects<br/>a small sample of complaints"]
         end
-
-        subgraph GOLD["Gold · BigQuery-managed Iceberg"]
-            BACKLOG["daily_backlog<br/>Status counts within this sample"]
-            AGE["complaint_age_distribution<br/>Age of open tickets within this sample"]
-            CHANGES["observed_state_changes<br/>Compare consecutive observations"]
+        subgraph BronzeZone["2 · Bronze (Original data)"]
+            direction TB
+            Bronze["Cloud Storage: original API responses<br/>and a list of saved files"] --> Verify["Check files are unchanged<br/>prepare them for loading"]
         end
-
-        RECEIPT["Standard BigQuery ops<br/>Publication receipt for replay protection"]
+        subgraph ProcessingZone["3 · CLEAN AND CHECK — BIGQUERY SQL"]
+            direction TB
+            Raw["Load original responses<br/>into BigQuery"]
+            Normalize["SQL: read each complaint,<br/>clean values and group statuses"]
+            Outcomes["Save each complaint<br/>with its check results"]
+            Rejected["Show records with problems<br/>and explain what failed"]
+            Raw --> Normalize --> Outcomes --> Rejected
+        end
+        subgraph Transaction["Save results together · all succeed or none are saved"]
+            direction LR
+            Gates["Check data quality and Deduplicate<br/>(keep one record per complaint)"]
+            subgraph SilverZone["4 · Silver (Clean data) · Iceberg"]
+                direction TB
+                Current["Latest known details<br/>for each complaint"]
+                History["Keep what we saw<br/>each time we collected data"]
+            end
+            subgraph GoldZone["5 · Gold (Summaries) · Iceberg"]
+                direction TB
+                Metrics["Count sampled complaints by status<br/>and group open ones by age"]
+                Changes["Show changes in status<br/>or reopen count between visits"]
+            end
+            Receipt["Record the completed run<br/>to avoid saving it twice"]
+            Gates --> SilverZone --> GoldZone --> Receipt
+        end
+        SourceZone --> BronzeZone --> ProcessingZone --> Transaction
     end
-
-    API --> EXTRACT --> BRONZE --> BEAM
-    BEAM -->|"All outcomes via batch load jobs"| STAGING
-    BEAM -->|"Rejected outcomes"| QUARANTINE
-    STAGING --> GATES
-    GATES -->|"Checks pass; run not already published"| CANDIDATES
-    CANDIDATES --> CURRENT
-    CANDIDATES --> HISTORY
-    CANDIDATES --> BACKLOG
-    CANDIDATES --> AGE
-    HISTORY --> CHANGES
-    CURRENT --> RECEIPT
-    BACKLOG --> RECEIPT
-    AGE --> RECEIPT
-    CHANGES --> RECEIPT
-
-    COMPOSER -.->|"prepare: capture source"| EXTRACT
-    COMPOSER -.->|"normalize: launch and wait"| BEAM
-    COMPOSER -.->|"publish: after Dataflow succeeds"| GATES
-
-    classDef processing fill:#e8f1ff,stroke:#2563eb,color:#172554;
-    classDef bronze fill:#fff1df,stroke:#b45309,color:#78350f;
-    classDef silver fill:#f1f5f9,stroke:#64748b,color:#0f172a;
-    classDef gold fill:#fef9c3,stroke:#a16207,color:#713f12;
-    classDef rejected fill:#fff1f2,stroke:#be123c,color:#881337;
-    class EXTRACT,BEAM,GATES,CANDIDATES,COMPOSER processing;
-    class BRONZE bronze;
-    class CURRENT,HISTORY,STAGING,RECEIPT silver;
-    class BACKLOG,AGE,CHANGES gold;
-    class QUARANTINE rejected;
+    style Composer fill:#eff6ff,stroke:#3b82f6,stroke-width:2px,stroke-dasharray:6 4,color:#1e3a8a
+    style SourceZone fill:#f8fafc,stroke:#94a3b8,color:#334155
+    style BronzeZone fill:#fff7ed,stroke:#c28748,color:#7c451b
+    style ProcessingZone fill:#eef2ff,stroke:#818cf8,color:#3730a3
+    style Transaction fill:#ffffff,stroke:#64748b,stroke-dasharray:4 4,color:#334155
+    style SilverZone fill:#f1f5f9,stroke:#94a3b8,color:#334155
+    style GoldZone fill:#fffbeb,stroke:#d4a72c,color:#854d0e
 ```
 
-Silver and Gold table files live in `gs://project_name-warehouse/` and are managed by BigQuery
-through the Cloud resource connection. Dataflow writes to standard staging, not directly to
-those Iceberg files. The separate `project_name-pipeline-temp` bucket holds job artifacts such
-as `pipeline.pb` and intermediate BigQuery load files; it is omitted from the main data flow.
+Read the colored sections from left to right: **Collect → Keep originals → Clean and check →
+Keep clean data → Build summaries**. Bronze means original data, Silver means clean data,
+and Gold means summaries. These sections describe the work, not physical cloud locations.
+Cloud Composer runs the steps in order and waits for each to finish before starting the next.
 
-Gold sample counts come from this capture's validated candidates. Observation history supplies
-the change comparisons. The publication receipt commits with Silver and Gold; a failed
-transaction leaves all of those published outputs unchanged. Bronze, staging, and quarantine
-remain available for diagnosis and replay.
+Inside the dashed box, all result updates succeed together or none are saved. The completion
+record prevents the same run from being saved twice. Summaries describe the collected sample;
+changes are found by comparing what we saw on different visits.
 
-## Chapter 1 — Create the GCP foundation
+BigQuery stores the original responses, check results and completion records in regular tables.
+Silver and Gold use Iceberg tables, whose files BigQuery manages in Cloud Storage. Do not edit
+those storage files yourself.
 
-### Set up your working environment
+Each run is a bounded offset sample, not a complete Bangkok population. Sampling a changing
+API can miss or repeat records. Gold metrics describe each sample; see the
+[data contract](data-contract.md) before interpreting results.
 
-You need a billing-enabled GCP project, permission to create its resources, the Google Cloud
-CLI, Python 3.11, and Docker for the later template chapter. Work from this repository's root.
-Use a supported single region for the resources; examples use `asia-southeast1`.
+## Chapter 1 — Prepare your local environment
 
-Create the Python environment once, or activate your existing one:
+Use Python 3.11 or newer, the Google Cloud CLI (`gcloud` and `bq`), and a GCP project with
+billing enabled. Run commands from the repository root:
 
 ```sh
 python3.11 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[gcp,beam,dev]'
+pip install -e '.[gcp,dev]'
 
 gcloud auth login
 gcloud auth application-default login
@@ -124,568 +92,415 @@ export TUTORIAL_PROJECT="project_name"
 export TUTORIAL_REGION="asia-southeast1"
 export TUTORIAL_RAW_BUCKET="${TUTORIAL_PROJECT}-raw"
 export TUTORIAL_WAREHOUSE_BUCKET="${TUTORIAL_PROJECT}-warehouse"
-export TUTORIAL_TEMP_BUCKET="${TUTORIAL_PROJECT}-pipeline-temp"
-export TUTORIAL_WORKER="dataflow-worker@${TUTORIAL_PROJECT}.iam.gserviceaccount.com"
-export TUTORIAL_COMPOSER_SA="composer-worker@${TUTORIAL_PROJECT}.iam.gserviceaccount.com"
-export TUTORIAL_RUN_ID="lesson-001"
-
+export TUTORIAL_RUN_ID="sql-lesson-001"
+export TUTORIAL_PROCESSING_ID="sql-lesson-001-attempt-1"
 gcloud config set project "$TUTORIAL_PROJECT"
-gcloud auth application-default set-quota-project "$TUTORIAL_PROJECT"
 ```
 
-Replace `project_name` before running cloud commands. The bucket names must also be globally
-available. The first login is for `gcloud`; application default credentials are for Python
-clients. Later, Dataflow and Composer use attached service accounts.
+`gcloud` credentials serve CLI commands; Application Default Credentials serve the Python
+Storage and BigQuery clients. Use your development identity locally and an attached service
+account in Composer. A downloaded service-account key is unnecessary.
 
-### Enable the APIs
+Create a local config only if you do not already have one:
+
+```sh
+python - <<'PY'
+from pathlib import Path
+source = Path('config/example.json')
+target = Path('config/local.json')
+if not target.exists():
+    target.write_bytes(source.read_bytes())
+PY
+```
+
+Edit `config/local.json` so its project, region, raw/warehouse buckets, datasets and connection
+match your variables. Keep `coordinate_order: "lon_lat"` unless your inspected source uses the
+opposite order. The local config is ignored by Git.
+
+**Checkpoint:** distinguish three identifiers: `run_id` identifies an immutable capture;
+`processing_id` identifies a processing attempt; a BigQuery job ID identifies a submitted job.
+
+## Chapter 2 — Create storage and BigQuery resources
+
+Enable the APIs used by this tutorial:
 
 ```sh
 gcloud services enable \
-  storage.googleapis.com \
-  bigquery.googleapis.com \
-  bigqueryconnection.googleapis.com \
-  bigquerystorage.googleapis.com \
-  dataflow.googleapis.com \
-  compute.googleapis.com \
-  artifactregistry.googleapis.com \
-  composer.googleapis.com \
-  iam.googleapis.com
+  storage.googleapis.com bigquery.googleapis.com bigqueryconnection.googleapis.com \
+  composer.googleapis.com iam.googleapis.com
 ```
 
-Enable any additional environment dependencies requested by the Composer creation workflow
-in chapter 8. Cloud Build is unnecessary for the local Docker build shown later.
-
-### Create three buckets
+Create two buckets and four datasets in the same region. Bucket names must be globally unique.
+If these resources already exist, inspect and reuse them instead of rerunning creation:
 
 ```sh
 gcloud storage buckets create "gs://${TUTORIAL_RAW_BUCKET}" \
-  --location="$TUTORIAL_REGION" --uniform-bucket-level-access --public-access-prevention
+  --location="$TUTORIAL_REGION" --uniform-bucket-level-access
 gcloud storage buckets create "gs://${TUTORIAL_WAREHOUSE_BUCKET}" \
-  --location="$TUTORIAL_REGION" --uniform-bucket-level-access --public-access-prevention
-gcloud storage buckets create "gs://${TUTORIAL_TEMP_BUCKET}" \
-  --location="$TUTORIAL_REGION" --uniform-bucket-level-access --public-access-prevention
-```
+  --location="$TUTORIAL_REGION" --uniform-bucket-level-access
 
-The raw bucket holds Bronze and quarantine. The temporary bucket holds Dataflow staging,
-BigQuery load files, and template metadata. The warehouse bucket is reserved for files managed
-by BigQuery's Iceberg tables. Keep their purposes separate so temporary-file cleanup does not
-delete warehouse data.
-
-### Create datasets and service accounts
-
-```sh
 for dataset in staging silver gold ops; do
-  bq --location="$TUTORIAL_REGION" mk --dataset "${TUTORIAL_PROJECT}:${dataset}"
+  bq --project_id="$TUTORIAL_PROJECT" --location="$TUTORIAL_REGION" \
+    mk --dataset "${TUTORIAL_PROJECT}:${dataset}"
 done
-
-gcloud iam service-accounts create dataflow-worker --display-name="Dataflow tutorial worker"
-gcloud iam service-accounts create composer-worker --display-name="Composer tutorial worker"
 ```
 
-Use **IAM & Admin → IAM → Grant access** for project-level roles. Use each bucket's
-**Permissions** tab for bucket access. Use **BigQuery → dataset → Sharing / Permissions**
-for dataset-scoped access. Console labels may vary; the important distinction is the scope.
+Raw captures and load files belong in the raw bucket. The warehouse bucket holds only
+BigQuery-managed Iceberg files. Each table needs its own empty, nonoverlapping prefix.
 
-| Identity | Project roles | Dataset/bucket access |
-| --- | --- | --- |
-| Dataflow worker | Dataflow Worker, BigQuery Job User | BigQuery Data Editor on `staging`; Storage Object Viewer on raw; Storage Object User on temp and the raw quarantine prefix |
-| Composer worker | Composer Worker, Dataflow Developer, BigQuery Job User | BigQuery Data Viewer on staging; Data Editor on silver/gold/ops; object read/create on raw; object read on temp; Artifact Registry Reader on the image repository |
-| Manual operator | Permissions to create these resources and launch jobs | Source upload, staging access, table setup, and SQL publication access |
-
-Prefix-scoped quarantine writes can use an IAM condition. A simpler tutorial alternative is
-Storage Object User on the raw bucket for the Dataflow worker; explain its broader access.
-Give the worker Artifact Registry Reader on the repository when you create it in chapter 7.
-The Flex launcher runs with the worker identity and needs to read the template/image as well.
-
-Allow Composer to launch jobs with the Dataflow identity:
+Create a Cloud resource connection:
 
 ```sh
-gcloud iam service-accounts add-iam-policy-binding "$TUTORIAL_WORKER" \
-  --member="serviceAccount:${TUTORIAL_COMPOSER_SA}" \
-  --role=roles/iam.serviceAccountUser
-```
+bq --project_id="$TUTORIAL_PROJECT" --location="$TUTORIAL_REGION" \
+  mk --connection --connection_type=CLOUD_RESOURCE lakehouse_connection
 
-Your manual launch identity also needs Service Account User on the worker. Your environment
-creator needs permission to act as the Composer account. Preserve the standard Google-managed
-service-agent roles; these application accounts do not replace them.
-
-**Checkpoint:** show the three buckets, four datasets, and two application accounts. Explain
-which identity reads Bronze and which identity will manage Iceberg files.
-
-## Chapter 2 — Call the API directly
-
-Start with one small request. This code does not import the application extractor:
-
-```python
-import json
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
-
-endpoint = "https://publicapi.traffy.in.th/share/teamchadchart/search"
-parameters = {"limit": 3, "offset": 0}
-request = Request(
-    endpoint + "?" + urlencode(parameters),
-    headers={"User-Agent": "complaint-tutorial/0.1"},
-)
-with urlopen(request, timeout=30) as response:
-    raw_bytes = response.read(1_000_001)
-    if len(raw_bytes) > 1_000_000:
-        raise ValueError("Unexpectedly large sample response")
-    print("HTTP status:", response.status)
-
-payload = json.loads(raw_bytes)
-if payload.get("status") is not True or not isinstance(payload.get("results"), list):
-    raise ValueError("Unexpected API response")
-print("Envelope fields:", list(payload))
-print("Returned rows:", len(payload["results"]))
-for record in payload["results"]:
-    print({key: record.get(key) for key in ("state", "timestamp", "last_activity")})
-```
-
-Walk through URL parameters, the HTTP response, bytes, JSON parsing, and the `results` array.
-Do not assume that a successful response must be HTTP 200; this endpoint has returned 201.
-Do not print descriptions, addresses, or photo URLs into a public tutorial recording.
-
-**Checkpoint:** inspect `ticket_id`, `timestamp`, `last_activity`, `state`, `count_reopen`, and
-the shape of `coords`. Explain why strings and nulls require normalization.
-
-## Chapter 3 — Write bounded extraction and upload Bronze
-
-Open [`tutorials/extract_api.py`](../tutorials/extract_api.py). It is a standalone teaching
-script with the HTTP request, pagination, JSON writes, and checksums visible in one file.
-It does not call `complaint-pipeline` or the application extraction function.
-
-Build the script in these increments in your tutorial:
-
-1. Save one page with its original response text and UTC fetch time.
-2. Request offsets 0, 100, and 200, stopping early on a short page.
-3. Add a one-second pause between requests and the 300-row bound.
-4. Hash the original bytes, then hash the saved envelope bytes.
-5. Add every saved page to a manifest with its destination GCS URI and row count.
-6. Write the manifest after all requested pages succeed.
-
-```sh
-python tutorials/extract_api.py
-```
-
-This contacts the API and saves files under `work/build-along/lesson-001/`. It only writes
-locally; no GCS upload has happened yet. The manifest URIs already identify the intended
-destination. It refuses to reuse an existing local capture directory. Use a new
-`TUTORIAL_RUN_ID` for a fresh attempt after failure; resumable writes come in chapter 9.
-
-Upload the pages first, and the manifest last:
-
-```sh
-gcloud storage cp --no-clobber \
-  work/build-along/"${TUTORIAL_RUN_ID}"/page-*.json \
-  "gs://${TUTORIAL_RAW_BUCKET}/bronze/traffy/run_id=${TUTORIAL_RUN_ID}/"
-
-# Run only after the page-upload command succeeds.
-gcloud storage cp --no-clobber \
-  "work/build-along/${TUTORIAL_RUN_ID}/manifest.json" \
-  "gs://${TUTORIAL_RAW_BUCKET}/bronze/traffy/run_id=${TUTORIAL_RUN_ID}/manifest.json"
-
-export TUTORIAL_MANIFEST="gs://${TUTORIAL_RAW_BUCKET}/bronze/traffy/run_id=${TUTORIAL_RUN_ID}/manifest.json"
-gcloud storage ls "gs://${TUTORIAL_RAW_BUCKET}/bronze/traffy/run_id=${TUTORIAL_RUN_ID}/"
-```
-
-Use a new GCS prefix for this lesson capture. `--no-clobber` prevents accidental replacement;
-an already-existing object is not proof that its contents match yours. In the finished
-application, generation preconditions and checksum checks enforce the stronger contract.
-
-Offset paging is not a consistent snapshot of a changing API. Even a successful 300-row
-capture may contain duplicate tickets or omit records that moved between pages. The manifest
-therefore labels its coverage as `bounded_offset_sample`.
-
-**Checkpoint:** show the saved envelope and manifest in Cloud Storage. Explain why the
-manifest is uploaded last and why it lists files instead of using a wildcard.
-
-## Chapter 4 — Create the BigQuery connection and Iceberg tables
-
-### Create the Cloud resource connection
-
-```sh
-bq mk --connection \
-  --project_id="$TUTORIAL_PROJECT" \
-  --location="$TUTORIAL_REGION" \
-  --connection_type=CLOUD_RESOURCE lakehouse_connection
-
-bq show --connection --format=prettyjson \
+bq --project_id="$TUTORIAL_PROJECT" --location="$TUTORIAL_REGION" \
+  show --connection --format=prettyjson \
   "${TUTORIAL_PROJECT}.${TUTORIAL_REGION}.lakehouse_connection"
 ```
 
-Find `cloudResource.serviceAccountId` in the output and copy it into this variable:
+Copy `cloudResource.serviceAccountId` from that output, then grant that identity access to the
+warehouse bucket (substitute the returned address):
 
 ```sh
-export TUTORIAL_CONNECTION_SA="<connection_service_account_from_the_previous_output>"
-
+export TUTORIAL_CONNECTION_SA="CONNECTION_SERVICE_ACCOUNT_FROM_OUTPUT"
 gcloud storage buckets add-iam-policy-binding "gs://${TUTORIAL_WAREHOUSE_BUCKET}" \
   --member="serviceAccount:${TUTORIAL_CONNECTION_SA}" --role=roles/storage.objectUser
 gcloud storage buckets add-iam-policy-binding "gs://${TUTORIAL_WAREHOUSE_BUCKET}" \
   --member="serviceAccount:${TUTORIAL_CONNECTION_SA}" --role=roles/storage.legacyBucketReader
 ```
 
-This third service account is created for the connection. It gives BigQuery access to the
-warehouse bucket; it is distinct from your Composer and Dataflow accounts. The table creator
-also needs permission to delegate/use the connection. See the official
-[connection setup](https://docs.cloud.google.com/bigquery/docs/create-cloud-resource-connection).
+The table creator also needs dataset table-creation permissions and `bigquery.connections.delegate`
+on the connection (for example, Connection Admin on that connection). Runtime identities need
+BigQuery Job User on the project and read/write access to the four datasets. Give the manual
+extractor and Composer identity raw-bucket read/create access. See the complete
+[access matrix](gcp-setup.md) and Google's
+[connection documentation](https://docs.cloud.google.com/bigquery/docs/create-cloud-resource-connection).
 
-### Read and run explicit DDL
+**Checkpoint:** identify your local caller, the Composer account, and the connection account.
+These are different identities with different jobs.
 
-The full expanded DDL is in [`docs/sql/01_tables.sql`](sql/01_tables.sql). It contains ordinary
-SQL columns and `project_name` placeholders, not Python templates or a CLI generator.
-Copy it into the BigQuery SQL editor, replace the resource placeholders and region as needed,
-then execute the statements one at a time while explaining them.
+## Chapter 3 — Create ordinary staging and managed Iceberg tables
 
-The central pattern is:
+Open [`sql/01_tables.sql`](sql/01_tables.sql). It is fully expanded SQL with `project_name`
+placeholders; read it before running anything. It creates:
 
-```sql
--- Pattern only: the full runnable schema is in 01_tables.sql.
-CREATE TABLE `<project_name>.silver.complaints_current` (
-  ticket_id STRING,
-  state STRING,
-  source_updated_at TIMESTAMP,
-  observed_at TIMESTAMP
-)
-CLUSTER BY ticket_id
-WITH CONNECTION `<project_name>.asia-southeast1.lakehouse_connection`
-OPTIONS (
-  file_format = 'PARQUET',
-  table_format = 'ICEBERG',
-  storage_uri = 'gs://<project_name>-warehouse/silver/complaints_current/'
-);
-```
+| Layer | Objects | Storage |
+| --- | --- | --- |
+| Raw landing | `staging.raw_pages` | Standard BigQuery table |
+| Typed outcomes | `staging.complaint_rows`, `staging.rejected_rows` view | Standard BigQuery |
+| Silver | `complaints_current`, `complaint_observation_history` | Managed Iceberg |
+| Gold | `daily_backlog`, `complaint_age_distribution`, `observed_state_changes` | Managed Iceberg |
+| Operations | `ops.published_runs` | Standard BigQuery table |
 
-Use the **full schema** from `01_tables.sql` for actual execution; the shortened pattern
-omits fields required by publication. Create each managed table at its own empty warehouse
-prefix. BigQuery owns files under these prefixes. The staging and ops tables are standard
-BigQuery tables; only Silver and Gold have Iceberg options. This follows the
-[managed Iceberg DDL](https://docs.cloud.google.com/bigquery/docs/biglake-iceberg-tables-in-bigquery).
-
-**Checkpoint:** inspect table details and schemas. Explain the connection name, storage URI,
-and why a staging table does not have the Iceberg options.
-
-## Chapter 5 — Build Beam transformations and launch Dataflow
-
-### Start with a transformation function
-
-Teach the shape of a transformation before introducing a pipeline runner:
-
-```python
-from datetime import UTC, datetime
-
-def normalize_example(record):
-    created = datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00"))
-    if created.tzinfo is None:
-        raise ValueError("Timestamp must have a timezone")
-    reopen_count = int(record["count_reopen"])
-    if reopen_count < 0:
-        raise ValueError("Reopen count cannot be negative")
-    return {
-        "ticket_id": record["ticket_id"],
-        "created_at": created.astimezone(UTC).isoformat(),
-        "state": record["state"],
-        "reopen_count": reopen_count,
-    }
-```
-
-This small example introduces conversion and validation, but is not the final schema or full
-validation policy. Walk through [`normalize.py`](../src/complaint_pipeline/normalize.py) to
-extend it with required fields, nullable values, coordinate ranges, status mappings, deterministic
-hashes, and rejection reasons. Show that `page_rows()` verifies page hashes before yielding
-normalized outcomes. Invalid rows become data with reasons instead of disappearing silently.
-
-### Build the processing graph
-
-Open [`beam_pipeline.py`](../src/complaint_pipeline/beam_pipeline.py). The core graph is:
-
-```python
-rows = (
-    pipeline
-    | "CommittedPages" >> beam.Create(manifest["pages"])
-    | "VerifyAndNormalize" >> beam.ParDo(
-        NormalizePage(config, manifest["run_id"], processing_id)
-    )
-)
-```
-
-Explain each line: `Create` supplies manifest page descriptors; `ParDo` runs the page-reading
-and record-normalization code; the resulting collection contains accepted and rejected rows.
-`NormalizePage.setup()` creates a storage client on a worker, rather than serializing an open
-client from your laptop.
-
-Then show both sinks from the source file. `WriteToBigQuery` uses `FILE_LOADS`,
-`CREATE_NEVER`, and `WRITE_APPEND` to load the existing staging table. The second branch filters
-rejected rows, converts them to JSON lines, and writes quarantine objects. A sink failure fails
-the job; a record validation error becomes a rejected outcome.
-
-### Set application configuration
-
-Make a local copy of the example JSON without overwriting any configuration you already use.
-Ensure it contains your project, buckets, region, and worker account. Use
-`docs/sql/01_tables.sql`'s matching dataset and connection names. This file is configuration,
-not resource provisioning. Do not commit your personal version.
-
-### Submit the job explicitly
+Generate your local SQL copies from your validated config:
 
 ```sh
-export TUTORIAL_PROCESSING_ID="lesson-001-attempt-1"
-
-python -m complaint_pipeline.beam_pipeline \
-  --config_json "$(cat config/local.json)" \
-  --manifest_uri "$TUTORIAL_MANIFEST" \
-  --processing_id "$TUTORIAL_PROCESSING_ID" \
-  --runner DataflowRunner \
-  --project "$TUTORIAL_PROJECT" \
-  --region "$TUTORIAL_REGION" \
-  --job_name complaints-lesson-001 \
-  --temp_location "gs://${TUTORIAL_TEMP_BUCKET}/dataflow/temp" \
-  --staging_location "gs://${TUTORIAL_TEMP_BUCKET}/dataflow/staging" \
-  --service_account_email "$TUTORIAL_WORKER" \
-  --num_workers 1 --max_num_workers 2 \
-  --setup_file ./setup.py \
-  --requirements_file ./docker/requirements-dataflow.txt
+mkdir -p work/sql
+complaint-pipeline render-sql --config config/local.json --name bootstrap > work/sql/01_tables.sql
+complaint-pipeline render-sql --config config/local.json --name normalize > work/sql/02_normalize.sql
+complaint-pipeline render-sql --config config/local.json --name publish > work/sql/03_publish.sql
 ```
 
-แต่ติดเรื่องสิทธิ SA account
-Set your actual project ID, then grant the worker Storage Object User on the staging/temp bucket:
+These commands only substitute identifiers; they do not submit queries. Open the generated
+files and check the project, dataset, region, connection and bucket paths. Then create tables:
 
-```
-export PROJECT_NAME="project_name"
-
-gcloud storage buckets add-iam-policy-binding \
-  "gs://${PROJECT_NAME}-pipeline-temp" \
-  --member="serviceAccount:dataflow-worker@${PROJECT_NAME}.iam.gserviceaccount.com" \
-  --role=roles/storage.objectUser
-
+```sh
+bq --project_id="$TUTORIAL_PROJECT" --location="$TUTORIAL_REGION" query \
+  --use_legacy_sql=false < work/sql/01_tables.sql
 ```
 
-Allow Dataflow Worker grant for this account in the project policy. Add the required role if it isn’t inherited:
-```
-gcloud projects add-iam-policy-binding "$PROJECT_NAME" \
-  --member="serviceAccount:dataflow-worker@${PROJECT_NAME}.iam.gserviceaccount.com" \
-  --role=roles/dataflow.worker
-```
+Read a Silver table definition and explain its `WITH CONNECTION`, `file_format='PARQUET'`,
+`table_format='ICEBERG'`, and `storage_uri` clauses. BigQuery owns the physical warehouse files.
+`CREATE TABLE IF NOT EXISTS` does not migrate an existing incompatible schema.
 
-Submitting the Beam graph creates the Dataflow job. There is no separate persistent Dataflow
-cluster to create for this batch. Explain `DataflowRunner`, the worker service account, worker
-limits, and the temporary and code-staging locations. `setup.py` ships the local package;
-the requirements file supplies cloud dependencies on workers. Google's
-[Python Dataflow guide](https://docs.cloud.google.com/dataflow/docs/guides/create-pipeline-python)
-explains the runner model.
+Raw page text uses a `STRING` column so its exact bytes can be hashed before parsing. Nested
+JSON is parsed inside SQL. Iceberg outputs contain only the curated supported types.
+See [managed Iceberg tables](https://docs.cloud.google.com/bigquery/docs/biglake-iceberg-tables-in-bigquery).
 
-This example assumes a usable network with worker-to-worker connectivity and Google API/package
-access. Supply `--subnetwork` for a configured subnet; private workers require suitable routing
-and egress or a package mirror. Use a fresh job name for another run.
+**Checkpoint:** run `bq show --format=prettyjson` on `staging.raw_pages` and
+`silver.complaints_current`. Confirm that only Silver has the Iceberg storage configuration.
 
-**Checkpoint:** open **Dataflow → Jobs**, inspect the graph and logs, and wait for
-`JOB_STATE_DONE`. Then query the staging table with your run and processing IDs:
+## Chapter 4 — Extract the API yourself and commit Bronze
 
-```sql
-SELECT is_valid, COUNT(DISTINCT row_id) AS source_rows
-FROM `project_name.staging.complaint_rows`
-WHERE run_id = 'lesson-001' AND processing_id = 'lesson-001-attempt-1'
-GROUP BY is_valid;
-```
+Open [`../tutorials/extract_api.py`](../tutorials/extract_api.py). It uses `urllib.request` to
+call the public endpoint with `limit=100` and offsets `0`, `100`, and `200`, stopping early
+on a short page. There is no hidden Dataflow job or record cleaning in extraction.
 
-Compare the sum to the manifest count. Do not proceed while the Dataflow job is still running.
-
-If startup fails with `Unable to open file: .../pipeline.pb`, follow the
-[staging-file access diagnostic](troubleshooting.md). Your upload identity and the Dataflow
-worker are separate identities, so being able to see the object yourself is not sufficient.
-
-If startup fails with `ZONE_RESOURCE_POOL_EXHAUSTED`, follow the
-[worker-capacity retry example](troubleshooting.md#worker-startup-fails-with-zone_resource_pool_exhausted).
-It shows how to retry with another VM type and a fresh processing ID while keeping
-automatic zone selection within `asia-southeast1`.
-
-## Chapter 6 — Publish with visible SQL and query parameters
-
-Read [`docs/sql/02_publish.sql`](sql/02_publish.sql), the expanded publication script. Teach
-the statements in this order:
-
-1. Check the publication receipt for a matching run, manifest, and normalization policy.
-2. Reject divergent copies of a staging row; collapse identical retry copies by `row_id`.
-3. Reconcile counts and apply the maximum rejection fraction.
-4. Select one candidate per ticket, ordered by source update time and observation time.
-5. Insert observation history and `MERGE` the newest source versions into current state.
-6. Insert sample metrics and recompute observed changes for affected tickets.
-7. Record the successful run and commit the transaction.
-
-Show the actual `MERGE`, `LAG`, `ASSERT`, and `BEGIN TRANSACTION` statements while explaining
-them. Run the full script as one job; splitting its publication statements into separate jobs
-would lose its all-or-nothing behavior.
-
-The `@...` values are query parameters. Supply them explicitly with the BigQuery client, rather
-than inserting values into SQL strings. After replacing `project_name` in a local copy of
-`02_publish.sql` saved as `work/build-along/publish.sql`, run this Python code:
+The essential API request looks like this:
 
 ```python
-import hashlib
-import json
-import os
+parameters = {"limit": 100, "offset": 0}
+request = Request(API_URL + "?" + urlencode(parameters))
+with urlopen(request, timeout=30) as response:
+    raw = response.read(10_000_001)
+payload = json.loads(raw)
+records = payload["results"]
+```
+
+The complete script adds a size bound, checks the response status, validates the results
+array, pauses between pages, and saves exact response text with SHA-256 hashes. Run it:
+
+```sh
+python tutorials/extract_api.py
+```
+
+Inspect `work/build-along/sql-lesson-001/`. Each page contains `raw_json`, `body_sha256`,
+`fetched_at` and request metadata. The manifest lists the exact page URIs, byte hashes and
+record counts. The teaching script refuses an existing directory; a new extraction needs a
+new run ID. The reusable application extractor additionally supports partial capture resume.
+
+Upload page files first, then the manifest last:
+
+```sh
+gcloud storage cp --no-clobber "work/build-along/${TUTORIAL_RUN_ID}"/page-*.json \
+  "gs://${TUTORIAL_RAW_BUCKET}/bronze/traffy/run_id=${TUTORIAL_RUN_ID}/"
+gcloud storage cp --no-clobber "work/build-along/${TUTORIAL_RUN_ID}/manifest.json" \
+  "gs://${TUTORIAL_RAW_BUCKET}/bronze/traffy/run_id=${TUTORIAL_RUN_ID}/manifest.json"
+export TUTORIAL_MANIFEST="gs://${TUTORIAL_RAW_BUCKET}/bronze/traffy/run_id=${TUTORIAL_RUN_ID}/manifest.json"
+```
+
+Do not reuse an existing cloud run ID for a different local capture. Publishing the manifest
+last marks a complete capture. Integrity verification will reject mismatched existing pages.
+
+**Checkpoint:** inspect `record_count`, `pages`, and `source_snapshot_consistent: false` in
+the manifest. Explain why a sample is not a consistent source snapshot.
+
+## Chapter 5 — Load raw pages into BigQuery
+
+A normal BigQuery JSON load expects one JSON row per line. Our API returns a whole response
+object with a nested `results` array. Keep that response intact and load **one row per page**.
+The later SQL query will expand the array into individual complaint records.
+
+Open [`../tutorials/prepare_load.py`](../tutorials/prepare_load.py) and its small
+[`prepare_load` helper](../src/complaint_pipeline/ingest.py). The helper verifies page hashes,
+body hashes, fetch timestamps and counts. It wraps each exact response string with run ID,
+processing ID, manifest hash and source URI. It performs no business conversions.
+
+```sh
+python tutorials/prepare_load.py
+```
+
+Inspect one NDJSON row, without displaying the entire potentially sensitive API response:
+
+```sh
+python - <<'PY'
+import json, os
 from pathlib import Path
-from google.cloud import bigquery, storage
-from complaint_pipeline import CONTRACT_VERSION
-from complaint_pipeline.config import Config
-from complaint_pipeline.normalize import policy_hash
-
-config = Config.load("config/local.json")
-config.require_cloud()
-manifest_uri = os.environ["TUTORIAL_MANIFEST"]
-bucket, object_name = manifest_uri.removeprefix("gs://").split("/", 1)
-raw = storage.Client(project=config.project_name).bucket(bucket).blob(object_name).download_as_bytes()
-manifest = json.loads(raw)
-
-values = [
-    ("run_id", "STRING", manifest["run_id"]),
-    ("processing_id", "STRING", os.environ["TUTORIAL_PROCESSING_ID"]),
-    ("manifest_sha256", "STRING", hashlib.sha256(raw).hexdigest()),
-    ("policy_hash", "STRING", policy_hash(config)),
-    ("contract_version", "STRING", CONTRACT_VERSION),
-    ("expected_count", "INT64", manifest["record_count"]),
-    ("observed_at", "TIMESTAMP", manifest["observed_at"]),
-    ("coverage", "STRING", manifest["coverage"]),
-    ("max_rejected_fraction", "FLOAT64", config.max_rejected_fraction),
-]
-client = bigquery.Client(project=config.project_name, location=config.region)
-job = client.query(
-    Path("work/build-along/publish.sql").read_text(),
-    job_config=bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter(*value) for value in values],
-        maximum_bytes_billed=config.max_bytes_billed,
-    ),
-)
-job.result()
-print("Completed BigQuery job:", job.job_id)
+path = Path('work/build-along') / (os.environ['TUTORIAL_PROCESSING_ID'] + '.jsonl')
+row = json.loads(path.read_text().splitlines()[0])
+print({k: v for k, v in row.items() if k != 'raw_json'})
+print('Raw response characters:', len(row['raw_json']))
+PY
 ```
 
-The policy hash must use the same field rules as Dataflow; inspect its small implementation in
-`normalize.py`. It hashes the contract version, coordinate order, and configured status mappings.
-
-**Checkpoint:** query `ops.published_runs`, inspect one ticket in both Silver tables, and
-filter `gold.daily_backlog` to this run. Explain that `accepted_rows` counts source rows while
-`distinct_tickets` counts selected tickets. Replay publication and show unchanged table counts.
-
-## Chapter 7 — Package the job as a Flex Template
-
-After the manually submitted job works, introduce repeatable packaging. Create an image
-repository, then inspect `docker/Dockerfile`, `docker/launch.py`, and `docker/metadata.json`.
+Upload and submit a load job to the already-created raw table:
 
 ```sh
-gcloud artifacts repositories create pipeline-images \
-  --repository-format=docker --location="$TUTORIAL_REGION"
-gcloud auth configure-docker "${TUTORIAL_REGION}-docker.pkg.dev"
-
-export TUTORIAL_IMAGE="${TUTORIAL_REGION}-docker.pkg.dev/${TUTORIAL_PROJECT}/pipeline-images/complaints:0.1.0"
-docker buildx build --platform linux/amd64 \
-  --file docker/Dockerfile --tag "$TUTORIAL_IMAGE" --push .
-
-gcloud dataflow flex-template build \
-  "gs://${TUTORIAL_TEMP_BUCKET}/templates/complaints.json" \
-  --project="$TUTORIAL_PROJECT" --image="$TUTORIAL_IMAGE" \
-  --sdk-language=PYTHON --metadata-file=docker/metadata.json
+export TUTORIAL_LOAD_URI="gs://${TUTORIAL_RAW_BUCKET}/loads/${TUTORIAL_PROCESSING_ID}.jsonl"
+gcloud storage cp --no-clobber "work/build-along/${TUTORIAL_PROCESSING_ID}.jsonl" "$TUTORIAL_LOAD_URI"
+bq --project_id="$TUTORIAL_PROJECT" --location="$TUTORIAL_REGION" load \
+  --source_format=NEWLINE_DELIMITED_JSON --max_bad_records=0 \
+  "${TUTORIAL_PROJECT}:staging.raw_pages" "$TUTORIAL_LOAD_URI"
 ```
 
-Explain the two artifacts: the container contains the launcher code and dependencies; the
-GCS template specification references that image and declares launch parameters. The launcher
-submits and exits. The orchestrator waits for completion. Give the worker and Composer accounts
-repository read access, and your image publisher write access. Update `flex_template_uri` in
-your configuration to the template you just built. See the
-[Flex Template guidance](https://docs.cloud.google.com/dataflow/docs/guides/templates/configuring-flex-templates).
+The table's declared schema is used; do not autodetect complaint fields. The command waits
+for load completion. A failed load must be corrected before running normalization.
+Read [BigQuery JSON loading](https://docs.cloud.google.com/bigquery/docs/loading-data-cloud-storage-json).
 
-**Checkpoint:** show the image tag in Artifact Registry and inspect the template JSON in GCS.
+Query the landing table in the BigQuery editor, replacing the project placeholder:
 
-## Chapter 8 — Create Composer and deploy the DAG
+```sql
+SELECT run_id, processing_id, source_uri, record_count,
+       JSON_VALUE(SAFE.PARSE_JSON(raw_json), '$.status') AS api_status
+FROM `project_name.staging.raw_pages`
+WHERE run_id = 'sql-lesson-001' AND processing_id = 'sql-lesson-001-attempt-1';
+```
 
-### Create the environment yourself
+**Checkpoint:** there should be one row per page, not one row per complaint. Sum page
+`record_count` values and compare them with the manifest. Repeating a manual append can add
+identical pages; normalization deduplicates exact page copies and rejects conflicting ones.
+The Composer loader uses a deterministic load-job ID to reconnect after a lost response.
 
-In the Google Cloud console, open **Cloud Composer / Managed Service for Apache Airflow →
-Create environment**. Choose the Gen 3 environment option, your region, a small tutorial size,
-and the dedicated Composer service account. Grant that account Composer Worker in addition to
-the pipeline-specific permissions from chapter 1.
+## Chapter 6 — Transform and validate with BigQuery SQL
 
-Select a currently supported image compatible with this repository's Airflow 2 imports and
-Python 3.11 code. Do not assume an Airflow 3 image is interchangeable. Record the selected image
-and Google provider version in your tutorial. If no compatible image is available, adapt and
-validate the DAG against the offered version before deploying it.
+Open [`sql/02_normalize.sql`](sql/02_normalize.sql), then your local copy. Work through each
+stage in the BigQuery editor before running the full script:
 
-Alternatively, after selecting an actual image version from the console:
+1. `SAFE.PARSE_JSON(raw_json)` parses each page. Page-level `ASSERT` statements verify hashes,
+   successful API envelopes, manifest identity, page count and total record count.
+2. `UNNEST(JSON_QUERY_ARRAY(payload, '$.results')) WITH OFFSET` expands complaint records.
+   The offset, page hash, source URI and run ID produce a deterministic source-row ID.
+3. SQL helper functions trim strings, parse timezone-bearing timestamps, check finite numbers,
+   normalize category arrays, and handle explicitly configured coordinate order.
+4. Validation collects `rejection_reasons`. Invalid source records remain visible rather
+   than disappearing through a `WHERE` filter. Unknown statuses receive `state_group='unknown'`.
+5. The script computes content/policy hashes and atomically replaces this attempt's outcomes
+   in `staging.complaint_rows`. The rejected-row view filters `is_valid=false`.
+
+Try the array expansion directly:
+
+```sql
+SELECT p.source_uri, record_index,
+       JSON_VALUE(record, '$.ticket_id') AS ticket_id,
+       JSON_VALUE(record, '$.timestamp') AS raw_timestamp
+FROM `project_name.staging.raw_pages` AS p,
+UNNEST(JSON_QUERY_ARRAY(SAFE.PARSE_JSON(p.raw_json), '$.results')) AS record
+WITH OFFSET AS record_index
+WHERE run_id = 'sql-lesson-001' AND processing_id = 'sql-lesson-001-attempt-1';
+```
+
+Now submit the full SQL file. The small runner uses `bigquery.Client.query`, supplies typed
+parameters, prints the job ID, and waits for completion; it does not transform records:
 
 ```sh
-export TUTORIAL_COMPOSER_IMAGE="supported_image_version_selected_in_console"
-gcloud composer environments create complaint-tutorial \
-  --project="$TUTORIAL_PROJECT" --location="$TUTORIAL_REGION" \
+python tutorials/run_sql.py \
+  --config config/local.json --manifest "$TUTORIAL_MANIFEST" \
+  --processing-id "$TUTORIAL_PROCESSING_ID" \
+  --stage normalize --sql work/sql/02_normalize.sql
+```
+
+The parameter mapping is in `warehouse.query_parameters`: manifest values supply `run_id`,
+page/record counts, capture time, and manifest hash; config supplies coordinate order and
+status arrays; the code supplies contract/policy hashes. Values are bound separately from SQL.
+If you edit the normalization logic, edit `src/complaint_pipeline/sql/normalize.sql` and
+regenerate the local SQL copy, so the policy hash records the SQL you actually execute.
+
+Inspect both accepted and rejected outcomes:
+
+```sql
+SELECT is_valid, COUNT(*) AS records
+FROM `project_name.staging.complaint_rows`
+WHERE run_id = 'sql-lesson-001' AND processing_id = 'sql-lesson-001-attempt-1'
+GROUP BY is_valid;
+
+SELECT ticket_id, source_uri, rejection_reasons
+FROM `project_name.staging.rejected_rows`
+WHERE run_id = 'sql-lesson-001' AND processing_id = 'sql-lesson-001-attempt-1';
+```
+
+**Checkpoint:** accepted plus rejected equals the committed manifest count. SQL normalization
+must succeed before publication. A successful normalization can still fail the publication
+quality threshold; inspect the rejected records first.
+
+## Chapter 7 — Publish Silver and Gold with SQL
+
+Open [`sql/03_publish.sql`](sql/03_publish.sql). This script:
+
+1. Checks the receipt to prevent a published run from being replaced with different input or policy.
+2. Reconciles staging counts and enforces the configured rejected fraction (default 5%).
+3. Chooses one newest source version per ticket within the capture.
+4. Appends one observation per ticket to Silver history and merges Silver current state.
+5. Writes sample backlog and age metrics; recomputes observed transitions for affected tickets.
+6. Writes an `ops.published_runs` receipt in the same transaction as the Silver/Gold changes.
+
+Run it only after reviewing the counts:
+
+```sh
+python tutorials/run_sql.py \
+  --config config/local.json --manifest "$TUTORIAL_MANIFEST" \
+  --processing-id "$TUTORIAL_PROCESSING_ID" \
+  --stage publish --sql work/sql/03_publish.sql
+```
+
+Inspect the receipt and metrics:
+
+```sql
+SELECT * FROM `project_name.ops.published_runs` WHERE run_id = 'sql-lesson-001';
+SELECT organization, state_group, tickets
+FROM `project_name.gold.daily_backlog` WHERE run_id = 'sql-lesson-001';
+SELECT * FROM `project_name.silver.complaints_current` LIMIT 20;
+```
+
+Repeat the exact publication command: the receipt makes it a no-op. A published run ID is
+immutable. Corrected logic uses a new capture or an explicit migration, not a hidden rewrite.
+Serialize all publishers, including manual commands. Composer's concurrency setting protects
+only its own DAG. Read [BigQuery transactions](https://docs.cloud.google.com/bigquery/docs/transactions).
+
+**Checkpoint:** one receipt exists, the Gold ticket total matches the distinct valid tickets,
+and replay does not add another history observation.
+
+## Chapter 8 — Create Cloud Composer and deploy the DAG
+
+After the manual flow works, create a dedicated environment service account:
+
+```sh
+gcloud iam service-accounts create composer-complaints
+export TUTORIAL_COMPOSER_SA="composer-complaints@${TUTORIAL_PROJECT}.iam.gserviceaccount.com"
+gcloud projects add-iam-policy-binding "$TUTORIAL_PROJECT" \
+  --member="serviceAccount:${TUTORIAL_COMPOSER_SA}" --role=roles/composer.worker
+gcloud projects add-iam-policy-binding "$TUTORIAL_PROJECT" \
+  --member="serviceAccount:${TUTORIAL_COMPOSER_SA}" --role=roles/bigquery.jobUser
+gcloud storage buckets add-iam-policy-binding "gs://${TUTORIAL_RAW_BUCKET}" \
+  --member="serviceAccount:${TUTORIAL_COMPOSER_SA}" --role=roles/storage.objectUser
+```
+
+In BigQuery, open each of `staging`, `silver`, `gold`, and `ops` → **Sharing → Permissions**.
+Grant this account **BigQuery Data Editor** on those datasets. This grants the reads and DML
+needed by the application. The connection account retains warehouse-object access.
+The environment creator needs permission to create Composer environments and act as the
+chosen service account; follow your organization's service-agent requirements.
+
+Choose an available Composer 3 image with Airflow 2.x (the DAG uses its PythonOperator API):
+
+```sh
+gcloud composer image-versions list --location="$TUTORIAL_REGION"
+export TUTORIAL_COMPOSER_IMAGE="SUPPORTED_COMPOSER_3_AIRFLOW_2_IMAGE_FROM_LIST"
+export TUTORIAL_COMPOSER_ENV="complaint-tutorial"
+gcloud composer environments create "$TUTORIAL_COMPOSER_ENV" \
+  --location="$TUTORIAL_REGION" \
   --image-version="$TUTORIAL_COMPOSER_IMAGE" \
-  --service-account="$TUTORIAL_COMPOSER_SA" \
-  --environment-size=small
+  --service-account="$TUTORIAL_COMPOSER_SA"
 ```
 
-Choose networking that allows the extraction task to reach the public API. Follow any
-organization-specific environment or service-agent setup required by the creation page.
-Google documents the [environment creation process](https://docs.cloud.google.com/composer/docs/composer-3/create-environments).
+Composer has ongoing environment costs, even between runs. Create it when you are ready for
+this chapter. Ensure its workers can reach the public API and Google APIs. Private networking
+needs the appropriate egress configuration. See the
+[Composer creation guide](https://docs.cloud.google.com/composer/docs/composer-3/create-environments).
 
-### Teach the DAG before uploading it
+Install compatible `google-cloud-storage` and `google-cloud-bigquery` packages through the
+environment's **PyPI packages** tab if they are not already present. Keep the ranges from
+`pyproject.toml`, and let Composer report dependency conflicts before deploying.
 
-Open [`dags/complaint_medallion.py`](../dags/complaint_medallion.py) and explain:
-
-- `prepare`: read configuration at task runtime, capture Bronze, return metadata through XCom.
-- `DataflowStartFlexTemplateOperator`: pass the manifest and processing ID; wait for completion.
-- `publish`: submit the SQL only after Dataflow succeeds.
-- `prepare >> normalize >> publish`: dependency order.
-- `schedule=None`: start with manual triggers.
-- `max_active_runs=1`: serialize this DAG's publication runs.
-
-The DAG uses the hardened application extraction function instead of the lesson's one-pass
-extractor. Inspect that implementation in chapter 9 before enabling repeated scheduled use.
-Composer does not need the Beam SDK installed; it launches the template. Confirm that the
-chosen image supplies the Google provider and the storage/BigQuery Python clients.
-
-### Upload the DAG and application package
+Upload the application package (including its SQL directory) beside the DAG:
 
 ```sh
-export TUTORIAL_DAGS_PREFIX="$(gcloud composer environments describe complaint-tutorial \
+export TUTORIAL_DAG_PREFIX="$(gcloud composer environments describe "$TUTORIAL_COMPOSER_ENV" \
   --location="$TUTORIAL_REGION" --format='value(config.dagGcsPrefix)')"
-
-gcloud storage rsync --recursive --exclude='.*(__pycache__|\.pyc).*' \
-  src/complaint_pipeline "${TUTORIAL_DAGS_PREFIX}/complaint_pipeline"
-gcloud storage cp dags/complaint_medallion.py "${TUTORIAL_DAGS_PREFIX}/complaint_medallion.py"
+gcloud storage cp --recursive src/complaint_pipeline "$TUTORIAL_DAG_PREFIX/"
+gcloud storage cp dags/complaint_medallion.py "$TUTORIAL_DAG_PREFIX/"
 ```
 
-The package's `sql/` directory must be included. In the Airflow UI, create a Variable named
-`complaint_pipeline_config` containing your complete `config/local.json`. This is the same
-configuration used in the manual batch, including the newly built template URI.
+In Airflow **Admin → Variables**, set `complaint_pipeline_config` to the JSON content of
+`config/local.json`. The DAG reads it at execution time. Open the graph and explain:
 
-Wait for the DAG to appear without import errors. Trigger `complaint_medallion` and follow the
-task logs. The DAG creates its own capture ID; it does not reuse `lesson-001`.
+```text
+extract → load_raw → normalize_sql → publish_sql
+```
 
-**Checkpoint:** show the environment, DAG graph, successful tasks, linked Dataflow job, and
-the new BigQuery publication receipt. Keep scheduling off until this manual run works.
+Each downstream task waits for its predecessor to finish. `max_active_runs=1` serializes this
+DAG, `schedule=None` keeps it manually triggered, and extraction IDs are stable across task
+retries. XCom contains config and object references, not complaint payloads. Trigger one run
+and inspect the task logs plus the corresponding BigQuery jobs.
 
-## Chapter 9 — Add reliability and explain the limits
+**Checkpoint:** verify a new capture, raw pages, typed outcomes and exactly one publication
+receipt. Only then consider a schedule suited to the API's access limits.
 
-Return to [`extract.py`](../src/complaint_pipeline/extract.py) and
-[`storage.py`](../src/complaint_pipeline/storage.py). Compare them with the teaching extractor.
-Now the reasons for the extra machinery are visible: retry transient errors, resume immutable
-pages, prevent overwrites atomically, and verify saved content before reuse.
+## Chapter 9 — Practice failures, replay and cleanup
 
-Demonstrate an interrupted extraction, a rejected record, a missing staging row, and a repeated
-successful publication. Keep publisher runs serialized even when launching manually outside
-Composer. The [data contract](data-contract.md) explains the expected failure behavior.
+- Copy a fixture and change a timestamp to invalid text: SQL should preserve a rejected outcome.
+- Re-run normalization with the same capture and processing ID: outcome counts stay unchanged.
+- Re-run publication after success: the receipt prevents duplicate Silver/Gold writes.
+- Change input under an existing run ID: integrity/publication guards must reject it.
+- Make more than 5% of records invalid: publication fails while staging remains available.
+- Submit an older observation as a new capture: Silver current must not regress to an older
+  source update; history still records the observation.
 
-Explain the limitations alongside the reports: samples are not complete citywide coverage,
-unobserved intermediate transitions are unknown, missing tickets are not deletions, and
-`last_activity` is not a verified resolution timestamp. Improving update detection is a later
-lesson after the API's supported filters and access limits have been established.
+See [troubleshooting](troubleshooting.md) for load, SQL, IAM and retry errors and
+[the test guide](tutorial.md) for the synthetic SQL validation suite.
 
-Use the finished CLI as an optional final chapter: it packages the steps readers have already
-learned. For cleanup, delete the tutorial Composer environment through its console when it is
-no longer needed, stop any active jobs, and handle raw/temp retention separately from
-BigQuery-managed warehouse files.
-
-## Validation status
-
-The standalone extractor can be exercised with injected synthetic HTTP responses. Its manifest
-format is compatible with the existing normalizer. Cloud resource commands, SQL execution,
-container publishing, and Composer deployment are instructions for your own GCP environment;
-they have not been executed as part of preparing this guide.
+Raw and outcome staging tables expire partitions after 30 days based on their observation
+timestamps. Reprocessing captures older than that needs a reviewed retention change first.
+The Bronze bucket's lifecycle is your choice. Do not apply ordinary object-age deletion to
+managed Iceberg prefixes. When finished, remove tutorial resources yourself, especially an
+unused Composer environment; the repository does not delete cloud infrastructure.

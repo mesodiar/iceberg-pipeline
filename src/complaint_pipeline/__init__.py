@@ -1,3 +1,3 @@
 """Public complaint observation pipeline. Cloud dependencies are optional."""
 
-CONTRACT_VERSION = "1"
+CONTRACT_VERSION = "2-sql"

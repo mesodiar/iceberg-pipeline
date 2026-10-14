@@ -6,18 +6,11 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from complaint_pipeline.cli import local_process
 from complaint_pipeline.config import Config
 from complaint_pipeline.extract import capture, fetch
-from complaint_pipeline.normalize import (
-    load_manifest,
-    normalize,
-    page_rows,
-    policy_hash,
-    timestamp,
-)
+from complaint_pipeline.manifest import load_manifest, verified_page
 from complaint_pipeline.storage import Store, json_bytes
-from complaint_pipeline.warehouse import render_sql
+from complaint_pipeline.warehouse import policy_hash, render_sql
 
 FIXTURE = Path(__file__).resolve().parents[1] / "examples" / "complaints.json"
 
@@ -42,18 +35,6 @@ class PipelineTests(unittest.TestCase):
             fetcher=fetcher or self.fetcher,
             sleep=lambda _: None,
             now=lambda: "2026-10-12T06:00:00+00:00",
-        )
-
-    def normalize(self, record=None, **kwargs):
-        return normalize(
-            self.records[0] if record is None else record,
-            run_id="one",
-            processing_id="attempt",
-            source_uri="page.json",
-            page_hash="hash",
-            index=0,
-            observed_at="2026-10-12T06:00:00Z",
-            config=kwargs.get("config", self.config),
         )
 
     def test_bounded_capture_and_replay_never_refetches(self):
@@ -121,11 +102,7 @@ class PipelineTests(unittest.TestCase):
         page = manifest["pages"][0]
         Path(page["uri"]).write_text("{}")
         with self.assertRaisesRegex(ValueError, "checksum"):
-            list(
-                page_rows(
-                    page, store=Store(), run_id="run-1", processing_id="a", config=self.config
-                )
-            )
+            verified_page(Store(), page)
 
     def test_manifest_count_and_duplicate_pages_checked(self):
         uri = self.capture()
@@ -134,77 +111,6 @@ class PipelineTests(unittest.TestCase):
         Path(uri).write_bytes(json_bytes(manifest))
         with self.assertRaisesRegex(ValueError, "reconcile"):
             load_manifest(Store(), uri)
-
-    def test_local_counts_quarantine_and_deterministic_replay(self):
-        uri = self.capture()
-        out = Path(self.temp.name) / "normalized"
-        counts = local_process(self.config, uri, out, "local")
-        self.assertEqual({"input": 4, "accepted": 3, "quarantined": 1}, counts)
-        before = (out / "accepted.jsonl").read_bytes()
-        local_process(self.config, uri, out, "local")
-        self.assertEqual(before, (out / "accepted.jsonl").read_bytes())
-        invalid = json.loads((out / "quarantine.jsonl").read_text())
-        self.assertEqual(3, len(invalid["rejection_reasons"]))
-
-    def test_valid_thai_fields_and_types(self):
-        row = self.normalize()
-        self.assertTrue(row["is_valid"])
-        self.assertEqual("กำลังดำเนินการ", row["state"])
-        self.assertEqual("open", row["state_group"])
-        self.assertEqual(0, row["reopen_count"])
-        self.assertEqual(100.5, row["longitude"])
-
-    def test_unknown_state_stays_unknown(self):
-        self.assertEqual("unknown", self.normalize(self.records[2])["state_group"])
-
-    def test_nullable_fields_remain_nullable(self):
-        row = self.normalize(self.records[2] | {"count_reopen": None})
-        self.assertTrue(row["is_valid"])
-        self.assertIsNone(row["reopen_count"])
-        self.assertIsNone(row["latitude"])
-        self.assertIsNone(row["organization"])
-
-    def test_coordinate_order_explicit(self):
-        row = self.normalize(
-            self.records[0] | {"coords": [13.75, 100.5]},
-            config=replace(self.config, coordinate_order="lat_lon"),
-        )
-        self.assertTrue(row["is_valid"])
-        self.assertEqual(100.5, row["longitude"])
-        wrong = self.normalize(self.records[0] | {"coords": [13.75, 100.5]})
-        self.assertFalse(wrong["is_valid"])
-
-    def test_source_timestamps_are_timezone_aware(self):
-        self.assertEqual(timestamp("2026-10-12T07:00:00+07:00"), timestamp("2026-10-12T00:00:00Z"))
-        for value in (None, "broken", "2026-10-12 00:00:00"):
-            with self.subTest(value=value), self.assertRaises(ValueError):
-                timestamp(value)
-
-    def test_older_updated_time_is_rejected(self):
-        row = self.normalize(self.records[0] | {"last_activity": "2026-09-01T00:00:00Z"})
-        self.assertFalse(row["is_valid"])
-
-    def test_invalid_shapes_do_not_crash_processing(self):
-        for value in ([], "bad", 1, True):
-            with self.subTest(value=value):
-                self.assertFalse(self.normalize(value)["is_valid"])
-
-    def test_invalid_numeric_values_are_quarantined(self):
-        for field, values in {
-            "star": [True, "NaN", "Infinity", 6],
-            "count_reopen": [True, "2.5", -1, 2**63],
-            "coords": [[100, "NaN"], [None, 1], "bad"],
-        }.items():
-            for value in values:
-                with self.subTest(field=field, value=value):
-                    self.assertFalse(self.normalize(self.records[0] | {field: value})["is_valid"])
-
-    def test_content_hash_ignores_description_and_category_order(self):
-        a = self.normalize(self.records[0] | {"type": ["A", "B"]})
-        b = self.normalize(self.records[0] | {"type": ["B", "A", "A"], "description": "changed"})
-        self.assertEqual(a["content_hash"], b["content_hash"])
-        c = self.normalize(self.records[0] | {"state": "เสร็จสิ้น"})
-        self.assertNotEqual(a["content_hash"], c["content_hash"])
 
     def test_policy_hash_changes_with_classification(self):
         self.assertNotEqual(
@@ -227,7 +133,7 @@ class PipelineTests(unittest.TestCase):
             Config().require_cloud()
 
     def test_sql_renders_only_identifiers_leaving_parameters_bound(self):
-        for name in ("bootstrap", "publish"):
+        for name in ("bootstrap", "normalize", "publish"):
             sql = render_sql(name, self.config)
             self.assertNotIn("${", sql)
             self.assertIn("`project_name.", sql)

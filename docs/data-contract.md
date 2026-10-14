@@ -52,19 +52,27 @@ heuristically. The initial mapping recognizes `รอรับเรื่อง
 and `เสร็จสิ้น` as closed. All other labels are `unknown`, so they cannot silently inflate
 the closed count. Review the mapping against actual source semantics before treating it as
 an operational KPI. Mapping changes alter `policy_hash` and cannot replace an already
-published capture. Increment `CONTRACT_VERSION` when normalization logic changes.
+published capture. The policy hash includes the normalization SQL file, so SQL edits also
+change the policy. The SQL implementation uses contract `2-sql`; see the migration guide
+for the boundary between the old Python hashes and new BigQuery hashes.
 
-Free text, addresses, photo URLs, and notes remain in restricted Bronze, not in the analytic
-projection. Quarantine includes provenance and rejection reasons; the original record is
+Free text, addresses, photo URLs, and notes remain in restricted Bronze and `staging.raw_pages`,
+not in the analytic projection. Restrict access to the raw dataset as well as the raw bucket.
+The rejected-row view includes provenance and rejection reasons; the original record is
 retrievable from its Bronze page. `content_hash` covers curated business fields, not every
 source field. Adding an unmapped API field therefore does not change the analytic hash.
 
 ## Tables
 
-`staging.complaint_rows` is a standard BigQuery table with a 30-day partition expiry based
-on the original observation date. Historical replay older than that requires you to extend
-or disable this expiration first. `processing_id` isolates processing attempts; delivery
-retries may append identical staging rows. SQL deduplicates by `row_id`, then checks counts.
+`staging.raw_pages` stores one verified API response per row. Normalization deduplicates exact
+page copies and fails on conflicting copies, invalid envelopes or count mismatches before
+expanding `results`. Record shape/type failures become rejected outcomes.
+
+`staging.raw_pages` and `staging.complaint_rows` are standard BigQuery tables with a 30-day
+partition expiry based on the original observation date. Historical replay older than that
+requires you to extend or disable this expiration first. `processing_id` isolates processing
+attempts; normalization atomically replaces only that attempt's outcome rows. Publication
+also checks duplicate row identities and verifies the manifest count.
 Use a new processing ID when rerunning with corrected code after a failed unpublished attempt.
 
 `silver.complaints_current` contains the highest `source_updated_at` version ever accepted
@@ -106,8 +114,8 @@ resolution durations, exhaustive transition history, observed deletions, or city
 | Permanent HTTP failure | Fail extraction; no manifest commit |
 | Process stops during extraction | Resume existing immutable pages with the same run ID/config |
 | Checksum mismatch or unknown API envelope | Fail the batch, rather than quarantine every row |
-| Invalid record | Stage a rejected outcome and write GCS quarantine |
-| BigQuery load failure | Dataflow fails; publication must not run |
+| Invalid record | Stage a rejected outcome; expose it through `staging.rejected_rows` |
+| BigQuery load failure | Raw load fails; normalization/publication must not run |
 | Missing staging records | Manifest reconciliation fails; published tables remain unchanged |
 | Rejection ratio above configured threshold | Entire publication is rejected |
 | SQL statement fails | Transaction rolls back Silver, Gold, and receipt together |
@@ -115,6 +123,6 @@ resolution durations, exhaustive transition history, observed deletions, or city
 | Different input/policy under a published run ID | Refuse mutation; use a controlled migration |
 
 For this tutorial, serialize **all publishers**, including different DAGs or manual commands.
-`max_active_runs=1` protects only this DAG. Staging and GCS quarantine are prepublication
+`max_active_runs=1` protects only this DAG. Raw staging and rejected outcomes are prepublication
 diagnostics and are not part of the Silver/Gold transaction. A receipt is written only after
-successful validation; failed jobs remain visible in Airflow, Dataflow, and BigQuery job logs.
+successful validation; failed jobs remain visible in Airflow and BigQuery job logs.

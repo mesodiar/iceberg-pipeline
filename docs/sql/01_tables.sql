@@ -1,6 +1,20 @@
--- Expanded tutorial reference. Replace project_name and resource names before execution.
 -- Run manually after creating datasets, the connection, and empty warehouse prefixes.
 -- All staging tables are ordinary BigQuery tables. Only Silver and Gold use Iceberg.
+CREATE TABLE IF NOT EXISTS `project_name.staging.raw_pages` (
+  run_id STRING,
+  processing_id STRING,
+  manifest_sha256 STRING,
+  source_uri STRING,
+  envelope_sha256 STRING,
+  body_sha256 STRING,
+  fetched_at TIMESTAMP,
+  record_count INT64,
+  raw_json STRING
+)
+PARTITION BY DATE(fetched_at)
+CLUSTER BY run_id, processing_id
+OPTIONS (partition_expiration_days = 30);
+
 CREATE TABLE IF NOT EXISTS `project_name.staging.complaint_rows` (
   row_id STRING,
   run_id STRING,
@@ -28,6 +42,9 @@ CREATE TABLE IF NOT EXISTS `project_name.staging.complaint_rows` (
 PARTITION BY DATE(observed_at)
 CLUSTER BY run_id, processing_id
 OPTIONS (partition_expiration_days = 30);
+
+CREATE OR REPLACE VIEW `project_name.staging.rejected_rows` AS
+SELECT * FROM `project_name.staging.complaint_rows` WHERE NOT is_valid;
 
 CREATE TABLE IF NOT EXISTS `project_name.ops.published_runs` (
   run_id STRING, manifest_sha256 STRING, policy_hash STRING, contract_version STRING,

@@ -6,8 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from complaint_pipeline.config import Config
-from complaint_pipeline.normalize import load_manifest, page_rows
+from complaint_pipeline.manifest import load_manifest, verified_page
 from complaint_pipeline.storage import Store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,7 +28,7 @@ class TutorialExtractionTests(unittest.TestCase):
             sleep=lambda _: None,
         )
 
-    def test_pages_can_be_read_by_application_normalizer(self):
+    def test_pages_can_be_verified_for_raw_load(self):
         records = [self.record | {"ticket_id": f"demo-{i}"} for i in range(205)]
         requests = []
 
@@ -48,18 +47,11 @@ class TutorialExtractionTests(unittest.TestCase):
         rows = [
             row
             for page in manifest["pages"]
-            for row in page_rows(
-                page,
-                store=UploadedObjects(),
-                run_id=manifest["run_id"],
-                processing_id="attempt-1",
-                config=Config(),
-            )
+            for row in json.loads(verified_page(UploadedObjects(), page)["raw_json"])["results"]
         ]
         self.assertEqual([0, 100, 200], [request["offset"] for request in requests])
         self.assertEqual(205, manifest["record_count"])
         self.assertEqual(205, len(rows))
-        self.assertTrue(all(row["is_valid"] for row in rows))
         self.assertTrue(
             all(page["uri"].startswith("gs://project_name-raw/") for page in manifest["pages"])
         )

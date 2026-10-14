@@ -5,13 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "complaint-lakehouse"
 version = "0.1.0"
-description = "A batch medallion pipeline for public complaint observations"
+description = "A BigQuery SQL medallion pipeline for public complaint observations"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
 gcp = ["google-cloud-storage>=2.18,<4", "google-cloud-bigquery>=3.25,<4"]
-beam = ["apache-beam[gcp]==2.77.0"]
 dev = ["ruff>=0.9,<1"]
 
 [project.scripts]

@@ -1,4 +1,3 @@
--- Expanded tutorial reference. Replace project_name and resource names before execution.
 -- Parameters are bound by the Python publisher; identifiers are rendered from validated config.
 -- Serialize publishers. Composer enforces max_active_runs=1; manual runs must do likewise.
 BEGIN TRANSACTION;

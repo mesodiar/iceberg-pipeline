@@ -1,19 +1,13 @@
 {
-  "project_name": "iceberg-bigquery-pipeline",
+  "project_name": "project_name",
   "region": "asia-southeast1",
-  "bronze_root": "gs://iceberg-bigquery-pipeline-raw/bronze/traffy",
-  "warehouse_root": "gs://iceberg-bigquery-pipeline-warehouse",
-  "temp_root": "gs://iceberg-bigquery-pipeline-pipeline-temp/dataflow",
-  "quarantine_root": "gs://iceberg-bigquery-pipeline-raw/quarantine/traffy",
+  "bronze_root": "gs://project_name-raw/bronze/traffy",
+  "warehouse_root": "gs://project_name-warehouse",
   "staging_dataset": "staging",
   "silver_dataset": "silver",
   "gold_dataset": "gold",
   "ops_dataset": "ops",
   "connection_id": "lakehouse_connection",
-  "worker_service_account": "dataflow-worker@project-42481bef-e5f7-4f5b-8b6.iam.gserviceaccount.com",
-  "flex_template_uri": "gs://iceberg-bigquery-pipeline-pipeline-temp/templates/complaints.json",
-  "subnetwork": "",
-  "max_workers": 2,
   "api_url": "https://publicapi.traffy.in.th/share/teamchadchart/search",
   "page_size": 100,
   "max_records": 1000,
@@ -24,6 +18,11 @@
   "max_rejected_fraction": 0.05,
   "max_bytes_billed": 10000000000,
   "coordinate_order": "lon_lat",
-  "closed_states": ["เสร็จสิ้น"],
-  "open_states": ["รอรับเรื่อง", "กำลังดำเนินการ"]
+  "closed_states": [
+    "เสร็จสิ้น"
+  ],
+  "open_states": [
+    "รอรับเรื่อง",
+    "กำลังดำเนินการ"
+  ]
 }

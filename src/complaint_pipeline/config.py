@@ -2,6 +2,7 @@
 
 import json
 import re
+import warnings
 from dataclasses import dataclass, fields
 from pathlib import Path
 
@@ -12,17 +13,11 @@ class Config:
     region: str = "asia-southeast1"
     bronze_root: str = "work/bronze"
     warehouse_root: str = "gs://project_name-warehouse"
-    temp_root: str = "gs://project_name-pipeline-temp/dataflow"
-    quarantine_root: str = "gs://project_name-raw/quarantine/traffy"
     staging_dataset: str = "staging"
     silver_dataset: str = "silver"
     gold_dataset: str = "gold"
     ops_dataset: str = "ops"
     connection_id: str = "lakehouse_connection"
-    worker_service_account: str = "dataflow-worker@project_name.iam.gserviceaccount.com"
-    flex_template_uri: str = "gs://project_name-pipeline-temp/templates/complaints.json"
-    subnetwork: str = ""
-    max_workers: int = 2
     api_url: str = "https://publicapi.traffy.in.th/share/teamchadchart/search"
     page_size: int = 100
     max_records: int = 1000
@@ -54,8 +49,8 @@ class Config:
             raise ValueError("page_size must be 1..1000; max_records must be 1..100000")
         if self.start_offset < 0 or self.request_delay_seconds < 0:
             raise ValueError("offset and request delay must be nonnegative")
-        if self.timeout_seconds <= 0 or self.max_attempts < 1 or self.max_workers < 1:
-            raise ValueError("timeouts, attempts, and workers must be positive")
+        if self.timeout_seconds <= 0 or self.max_attempts < 1:
+            raise ValueError("timeouts and attempts must be positive")
         if not 0 <= self.max_rejected_fraction < 1 or self.max_bytes_billed <= 0:
             raise ValueError("Invalid quality or query cost limit")
         if self.coordinate_order not in {"lon_lat", "lat_lon"}:
@@ -66,14 +61,34 @@ class Config:
     def require_cloud(self):
         if not re.fullmatch(r"[a-z][a-z0-9-]{4,28}[a-z0-9]", self.project_name):
             raise ValueError("Replace project_name with your actual GCP project ID")
-        for name in ("bronze_root", "temp_root", "quarantine_root", "warehouse_root"):
+        for name in ("bronze_root", "warehouse_root"):
             value = getattr(self, name)
             if not value.startswith("gs://") or "project_name" in value:
                 raise ValueError(f"Configure {name} with your own GCS location")
 
     @classmethod
+    def from_dict(cls, values):
+        # Existing ignored local configs may still contain the retired runner settings.
+        retired = {
+            "temp_root",
+            "quarantine_root",
+            "worker_service_account",
+            "flex_template_uri",
+            "subnetwork",
+            "max_workers",
+        }
+        removed = retired.intersection(values)
+        if removed:
+            warnings.warn(
+                "Ignored retired Dataflow settings: " + ", ".join(sorted(removed)),
+                UserWarning,
+                stacklevel=2,
+            )
+        return cls(**{key: value for key, value in values.items() if key not in retired})
+
+    @classmethod
     def load(cls, path):
-        return cls(**json.loads(Path(path).read_text(encoding="utf-8")))
+        return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
 def safe_run_id(value):

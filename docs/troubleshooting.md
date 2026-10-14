@@ -1,126 +1,76 @@
-# Troubleshooting the Dataflow tutorial
+# Troubleshooting the BigQuery SQL tutorial
 
-## Worker startup fails with `ZONE_RESOURCE_POOL_EXHAUSTED`
+## Raw load fails
 
-This error means Compute Engine cannot supply the requested worker VM in the selected
-zone at that time. It is a capacity failure; changing storage IAM or increasing a quota
-does not make that capacity available.
+Confirm `staging.raw_pages` exists in the same region as the load job and source bucket.
+Run the new bootstrap DDL if upgrading. Load the prepared NDJSON file, not the original nested
+API response or the manifest. Each NDJSON row holds a whole response in `raw_json`.
 
-Inspect the failed job's worker type and shuffle mode:
+Use the declared raw schema; do not autodetect complaint fields, skip bad rows, or ignore
+unknown fields. The caller needs BigQuery Job User, staging write permissions and source-object
+read access. Being able to upload as one identity does not prove Composer can read it.
 
-```sh
-gcloud dataflow jobs describe JOB_ID --full \
-  --project=project_name --region=asia-southeast1 \
-  --format='yaml(currentState,environment.shuffleMode,environment.workerPools.machineType,environment.workerPools.zone)'
+The application loader uses deterministic job IDs. On an uncertain submission it reconnects
+to the existing job. A terminally failed load needs a new processing ID after fixing its cause.
+Manual `bq load` can append duplicates; normalization tolerates identical page copies.
+
+## Manifest, page, or checksum assertion fails
+
+Python checks original envelope and body bytes before loading. SQL checks loaded body hashes,
+API response shape, manifest identity, page count, record count and latest fetch time. Never
+repair a committed capture by overwriting its page files. Inspect the exact manifest URI,
+run ID and processing ID; use a fresh capture if its original files are corrupt.
+
+Raw and outcome tables expire partitions after 30 days from observation time. Increase the
+retention deliberately before reprocessing older observations; otherwise their partitions
+can expire immediately. A published receipt remains authoritative even after staging expires.
+
+## SQL completes but records are rejected
+
+```sql
+SELECT ticket_id, source_uri, rejection_reasons
+FROM `project_name.staging.rejected_rows`
+WHERE run_id = 'sql-lesson-001' AND processing_id = 'sql-lesson-001-attempt-1';
 ```
 
-Keep `--region=asia-southeast1` and omit `--zone`, `--worker_zone`, and
-`--worker_region`. Google recommends regional placement with Dataflow Shuffle for batch
-jobs. Shuffle is enabled by default for this batch pipeline; `SERVICE_BASED` in the job
-description confirms it. Regional placement improves availability but cannot guarantee
-capacity. See [Dataflow regional placement](https://docs.cloud.google.com/dataflow/docs/concepts/regional-endpoints#regional_placement).
+Check timezone-bearing timestamps, timestamp order, string/array categories, nonnegative
+INT64 reopen counts, finite ratings in 0..5 and coordinate order/ranges. Unknown status labels
+are retained as `unknown`. SQL helper functions and their validation rules are in
+`src/complaint_pipeline/sql/normalize.sql`. Update the template and regenerate your local SQL
+copy together, using a new attempt for an unpublished capture.
 
-If the failed job used `n1-standard-1`, retry with `e2-standard-2`, which is also the worker
-type used by this repository's Composer DAG. This requests a different VM family and more
-CPU/memory per worker, so its resource usage and cost differ. Availability is not guaranteed.
-Google lists changing the worker machine type as a
-[worker-pool failure recovery option](https://docs.cloud.google.com/dataflow/docs/guides/common-errors#worker-pool-failure).
+## Publication quality gate fails
 
-From the repository root, with the build-along environment variables still set and the
-previous job in `JOB_STATE_FAILED`, submit a new attempt:
+Reconcile accepted plus rejected records against the manifest. The default rejected fraction
+is 5%. The four-row fixture deliberately has one invalid record, so it fails this gate.
+Inspect failures rather than raising the production threshold simply to make a job succeed.
+The isolated SQL integration test uses a permissive threshold only for synthetic assertions.
+Staging stays available when publication fails; Silver, Gold and the receipt roll back together.
 
-```sh
-export TUTORIAL_ATTEMPT="$(date -u +%Y%m%d%H%M%S)"
-export TUTORIAL_PROCESSING_ID="lesson-001-attempt-${TUTORIAL_ATTEMPT}"
+## A published run cannot be replaced
 
-python -m complaint_pipeline.beam_pipeline \
-  --config_json "$(cat config/local.json)" \
-  --manifest_uri "$TUTORIAL_MANIFEST" \
-  --processing_id "$TUTORIAL_PROCESSING_ID" \
-  --runner DataflowRunner \
-  --project "$TUTORIAL_PROJECT" \
-  --region asia-southeast1 \
-  --job_name "complaints-lesson-001-${TUTORIAL_ATTEMPT}" \
-  --temp_location "gs://${TUTORIAL_TEMP_BUCKET}/dataflow/temp" \
-  --staging_location "gs://${TUTORIAL_TEMP_BUCKET}/dataflow/staging" \
-  --service_account_email "$TUTORIAL_WORKER" \
-  --worker_machine_type e2-standard-2 \
-  --num_workers 1 --max_num_workers 2 \
-  --setup_file ./setup.py \
-  --requirements_file ./docker/requirements-dataflow.txt
-```
+The receipt binds a run ID to its manifest and SQL policy. A changed policy, SQL template or
+contract cannot silently replace it. Use a new capture for a new observation or design an
+explicit historical migration. See [the migration guide](migration-to-bigquery-sql.md).
 
-Reuse the existing Bronze manifest and tables. Use the new `TUTORIAL_PROCESSING_ID` in
-subsequent staging checks and publication; replace the tutorial's literal
-`lesson-001-attempt-1` where necessary. Wait for `JOB_STATE_DONE` before publishing.
-If capacity is still unavailable, wait and resubmit with another fresh attempt ID.
-A failed job does not resume automatically. Keep the existing region for this tutorial
-so the workers stay near its buckets and BigQuery datasets.
+## SQL access, region or cost errors
 
-## Unable to open a staging `pipeline.pb` file
+Check the query location, project, dataset permissions and `max_bytes_billed` in local config.
+A query cost cap can stop a correct query; review its estimate and data volume before changing
+the cap. The connection service account needs its warehouse bucket grants; the SQL caller
+needs job and dataset access. The build-along keeps all locations in one region.
 
-`pipeline.pb` is the staged Beam pipeline definition. If Dataflow cannot read it, startup can
-fail before the record transformations run. A successful upload by your local identity does
-not prove that the Dataflow worker can read the same object.
+## Composer import or task failure
 
-First check that the exact object from the error exists. Replace the example object path:
+Upload the entire `complaint_pipeline` package including its SQL subdirectory beside the DAG.
+Use the documented Airflow 2.x image, compatible Storage/BigQuery dependencies, and a valid
+`complaint_pipeline_config` variable. Inspect the failed task's BigQuery job ID and wait for
+that job's final state before retrying. If a SQL request timed out while its job is still
+running, wait for completion before manually clearing/retrying tasks. Do not overlap manual
+publication and DAG publication.
 
-```sh
-gcloud storage objects describe \
-  'gs://project_name-pipeline-temp/dataflow/staging/JOB_STAGING_DIRECTORY/pipeline.pb'
-```
+## Previous Dataflow errors
 
-This uses your local `gcloud` identity. If it reports an access error, existence remains
-unconfirmed. If it succeeds, inspect the failed job with the full view:
-
-```sh
-gcloud dataflow jobs describe JOB_ID --full \
-  --project=project_name --region=asia-southeast1
-```
-
-The full view can itself fail with a useful message identifying the worker account and the
-missing permission, for example `storage.objects.get`. Use the account named in that error,
-not an assumed default account. Check its bucket and project grants:
-
-```sh
-gcloud storage buckets get-iam-policy gs://project_name-pipeline-temp
-gcloud projects get-iam-policy project_name
-```
-
-For a confirmed missing object permission on this pipeline's staging/temp bucket, give the
-configured worker object read/write/delete access at that bucket:
-
-```sh
-gcloud storage buckets add-iam-policy-binding gs://project_name-pipeline-temp \
-  --member='serviceAccount:dataflow-worker@project_name.iam.gserviceaccount.com' \
-  --role=roles/storage.objectUser
-```
-
-The worker also requires the Dataflow Worker role on the job's project. If absent, grant it:
-
-```sh
-gcloud projects add-iam-policy-binding project_name \
-  --member='serviceAccount:dataflow-worker@project_name.iam.gserviceaccount.com' \
-  --role=roles/dataflow.worker
-```
-
-These grants serve different purposes: bucket object access permits reading the staged graph
-and managing temporary data; Dataflow Worker permits execution of Dataflow work units. A role
-with a similar display name is not evidence that the required object permission is present.
-See Google's [Dataflow permissions guidance](https://docs.cloud.google.com/dataflow/docs/concepts/security-and-permissions)
-and [permission troubleshooting](https://docs.cloud.google.com/dataflow/docs/guides/troubleshoot-permissions).
-
-Allow the IAM change to propagate, then resubmit the original Beam command using a fresh
-`--job_name` and `--processing_id`. The already-captured Bronze manifest can be reused.
-A failed job does not automatically restart when its permissions change. Publish only after
-the new job reaches `JOB_STATE_DONE`.
-
-If the error persists, inspect the new job's full error for the named identity and resource.
-Check conditional or inherited IAM policies, deny policies, and any security perimeter indicated
-by the logs. Do not solve a worker object-access problem by granting project-wide Owner or
-Storage Admin. An object that is actually absent requires correcting staging/upload or cleanup
-behavior rather than changing permissions.
-
-For this repository, keep `config/local.json`, the explicit manual `--service_account_email`
-flag, and the Composer configuration aligned. Manual Beam launches take their execution
-identity from the Beam flag; editing the JSON field alone does not change that launch flag.
+`pipeline.pb` access and `ZONE_RESOURCE_POOL_EXHAUSTED` errors belong to the retired Dataflow
+path. The current tutorial submits BigQuery load/query jobs and does not start worker VMs.
+Follow [migration](migration-to-bigquery-sql.md) rather than relaunching the former Beam command.
