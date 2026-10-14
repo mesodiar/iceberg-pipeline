@@ -1,0 +1,25 @@
+{
+  "name": "Complaint observation batch",
+  "description": "Verify committed Bronze pages and batch-load validated outcomes to staging",
+  "parameters": [
+    {
+      "name": "config_json",
+      "label": "Pipeline configuration JSON",
+      "helpText": "JSON configuration with project_name replaced by your GCP project ID",
+      "isOptional": false
+    },
+    {
+      "name": "manifest_uri",
+      "label": "Committed Bronze manifest URI",
+      "helpText": "GCS URI returned by complaint-pipeline extract",
+      "isOptional": false
+    },
+    {
+      "name": "processing_id",
+      "label": "Processing attempt identifier",
+      "helpText": "Reuse on a delivery retry; supply a new identifier to isolate a new processing attempt",
+      "isOptional": false,
+      "regexes": ["^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$"]
+    }
+  ]
+}

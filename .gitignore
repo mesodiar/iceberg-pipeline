@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local pipeline captures, configuration and dependency caches
+work/
+/config/local.json
+/docs/sql_real/
+.uv-cache/
+.uv-python/
