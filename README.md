@@ -26,6 +26,11 @@ flowchart LR
     Composer -. publishes .-> SQL
 ```
 
+Full diagram
+
+![pipeline-diagram](/docs/pipeline-diagram.png)
+
+
 The initial implementation is a **bounded sample**, not a complete Bangkok complaint census.
 It requests only `limit` and `offset`; no unverified incremental filter is assumed. Offset
 pagination over a changing API can skip or repeat records. See [data semantics](docs/data-contract.md).
