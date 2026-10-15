@@ -444,11 +444,19 @@ needed by the application. The connection account retains warehouse-object acces
 The environment creator needs permission to create Composer environments and act as the
 chosen service account; follow your organization's service-agent requirements.
 
-Choose an available Composer 3 image with Airflow 2.x (the DAG uses its PythonOperator API):
 
 ```sh
-gcloud composer image-versions list --location="$TUTORIAL_REGION"
 export TUTORIAL_COMPOSER_IMAGE="SUPPORTED_COMPOSER_3_AIRFLOW_2_IMAGE_FROM_LIST"
+export TUTORIAL_COMPOSER_ENV="complaint-tutorial"
+gcloud composer environments create "$TUTORIAL_COMPOSER_ENV" \
+  --location="$TUTORIAL_REGION" \
+  --image-version="$TUTORIAL_COMPOSER_IMAGE" \
+  --service-account="$TUTORIAL_COMPOSER_SA"
+```
+
+This tutorial will use `composer-3-airflow-3.3.1-build.3` as the latest release date on September 25, 2026
+```
+export TUTORIAL_COMPOSER_IMAGE="composer-3-airflow-3.3.1-build.3"
 export TUTORIAL_COMPOSER_ENV="complaint-tutorial"
 gcloud composer environments create "$TUTORIAL_COMPOSER_ENV" \
   --location="$TUTORIAL_REGION" \

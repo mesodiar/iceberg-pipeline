@@ -4,7 +4,9 @@ A build-along project that captures public Traffy Fondue complaint observations 
 Storage, processes them with BigQuery SQL, and publishes BigQuery-managed Apache Iceberg
 Silver and Gold tables. Cloud Composer orchestrates the batch after the manual steps work.
 
-Start with **[the build-along tutorial](docs/build-along.md)**. It walks through creating your
+Start with **[the friendly build-along](docs/build-along-friendly.md)** for plain-language
+explanations, small steps, and a check after each lesson. For more detail, use
+**[the technical build-along tutorial](docs/build-along.md)**. It walks through creating your
 resources, extracting the API, loading raw pages, writing SQL transformations, creating Iceberg
 tables, validating results, and deploying Composer. All examples use `project_name` placeholders.
 You create and manage your GCP resources yourself.
@@ -58,6 +60,7 @@ Beam dependency, Flex Template or container build is required.
 
 | Path | Purpose |
 | --- | --- |
+| `docs/build-along-friendly.md` | Friendly tutorial: API collection through SQL, Iceberg and Composer |
 | `docs/build-along.md` | Step-by-step manual tutorial and full pipeline diagram |
 | `docs/sql/01_tables.sql` | Readable staging, ops and Iceberg DDL |
 | `docs/sql/02_normalize.sql` | Readable JSON parsing and validation SQL |
@@ -95,6 +98,7 @@ rejected. At the default 5% rejection threshold that sample must fail publicatio
 
 ## Guides and limits
 
+- [Friendly build along](docs/build-along-friendly.md): plain-language lessons with commands and checkpoints.
 - [Build along](docs/build-along.md): individual resource and processing steps.
 - [GCP setup reference](docs/gcp-setup.md): resources, IAM and application commands.
 - [Migration from Dataflow](docs/migration-to-bigquery-sql.md): reuse existing resources and captures.
