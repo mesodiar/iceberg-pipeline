@@ -46,9 +46,9 @@ CREATE TEMP FUNCTION category_values(v JSON) AS (
 
 -- Appends and retries can duplicate a page, but cannot replace its contents.
 ASSERT NOT EXISTS (
-  SELECT source_uri FROM `project_name.staging.raw_pages`
+  SELECT source_uri FROM `project_name.staging.raw_pages` AS raw_page
   WHERE run_id = @run_id AND processing_id = @processing_id
-  GROUP BY source_uri HAVING COUNT(DISTINCT TO_JSON_STRING(raw_pages)) > 1
+  GROUP BY source_uri HAVING COUNT(DISTINCT TO_JSON_STRING(raw_page)) > 1
 ) AS 'Conflicting raw pages with the same source URI';
 
 CREATE TEMP TABLE pages AS

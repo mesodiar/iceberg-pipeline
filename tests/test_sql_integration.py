@@ -83,8 +83,12 @@ class BigQuerySQLTests(unittest.TestCase):
         publish = render_sql("publish", config)
 
         def temp_names(sql):
+            # Keep quoted, qualified references so the test doesn't supply an implicit
+            # bare-table alias that production table references might not provide.
             return re.sub(
-                r"`" + re.escape(project) + r"\.[a-z_]+\.([a-z_]+)`", lambda match: match[1], sql
+                r"`" + re.escape(project) + r"\.[a-z_]+\.([a-z_]+)`",
+                lambda match: f"`_SESSION.{match[1]}`",
+                sql,
             )
 
         params += [bigquery.ScalarQueryParameter("raw_rows", "STRING", json.dumps(rows))]

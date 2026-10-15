@@ -350,8 +350,11 @@ WITH OFFSET AS record_index
 WHERE run_id = 'sql-lesson-001' AND processing_id = 'sql-lesson-001-attempt-1';
 ```
 
-Now submit the full SQL file. The small runner uses `bigquery.Client.query`, supplies typed
-parameters, prints the job ID, and waits for completion; it does not transform records:
+Now submit the full SQL file. The runner replaces placeholder table references such as
+`project_name.staging.raw_pages` using the project and dataset names in `config/local.json`.
+Already-rendered table references are kept as written; the SQL file itself is not modified.
+The runner then uses `bigquery.Client.query`, supplies typed parameters, prints the job ID,
+and waits for completion; it does not transform records:
 
 ```sh
 python tutorials/run_sql.py \

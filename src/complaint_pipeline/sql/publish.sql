@@ -16,9 +16,9 @@ IF NOT EXISTS (
   -- Delivery retries can append duplicate rows. Divergent copies must fail, not be hidden.
   ASSERT NOT EXISTS (
     SELECT row_id
-    FROM `${project_name}.${staging_dataset}.complaint_rows`
+    FROM `${project_name}.${staging_dataset}.complaint_rows` AS staged_row
     WHERE run_id = @run_id AND processing_id = @processing_id
-    GROUP BY row_id HAVING COUNT(DISTINCT TO_JSON_STRING(complaint_rows)) > 1
+    GROUP BY row_id HAVING COUNT(DISTINCT TO_JSON_STRING(staged_row)) > 1
   ) AS 'Conflicting staging rows with the same source identity';
 
   CREATE TEMP TABLE batch AS

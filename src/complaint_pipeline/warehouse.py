@@ -92,6 +92,30 @@ def query_parameters(config, manifest_uri, processing_id, stage):
     return parameters
 
 
+def configure_query_sql(sql, config):
+    """Resolve table identifiers in the expanded lesson SQL using local configuration.
+
+    Already-rendered identifiers are retained. Query parameters, JSON paths and ordinary
+    string values are not substituted; this handles the lesson's backtick table references.
+    """
+    datasets = {
+        "staging": config.staging_dataset,
+        "silver": config.silver_dataset,
+        "gold": config.gold_dataset,
+        "ops": config.ops_dataset,
+    }
+
+    def replace_table(match):
+        dataset = datasets.get(match[1], match[1])
+        return f"`{config.project_name}.{dataset}.{match[2]}`"
+
+    return re.sub(
+        r"`project_name\.([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)`",
+        replace_table,
+        sql,
+    )
+
+
 def run_sql(config, manifest_uri, processing_id, stage):
     from google.cloud import bigquery
 
