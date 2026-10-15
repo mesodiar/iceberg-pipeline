@@ -482,12 +482,47 @@ gcloud storage cp --recursive src/complaint_pipeline "$TUTORIAL_DAG_PREFIX/"
 gcloud storage cp dags/complaint_medallion.py "$TUTORIAL_DAG_PREFIX/"
 ```
 
-In Airflow **Admin → Variables**, set `complaint_pipeline_config` to the JSON content of
-`config/local.json`. The DAG reads it at execution time. Open the graph and explain:
+In Airflow's **Variables** page (**Admin → Variables** in Airflow 2), create a variable
+with key `complaint_pipeline_config` and value equal to the entire JSON content of
+`config/local.json`. Paste the JSON object, not the file path. Saving a file on your laptop
+does not create an Airflow variable. Use the UI for the environment you just deployed to.
+Save the variable before triggering the DAG. If you see `VARIABLE_NOT_FOUND`, follow
+[the missing-variable fix](troubleshooting.md#composer-says-variable_not_found-complaint_pipeline_config),
+which also includes a command-line option. The DAG reads it at execution time. Open the graph and explain:
 
 ```text
 extract → load_raw → normalize_sql → publish_sql
 ```
+
+You will finally see this error in Airflow
+```
+google.api_core.exceptions.Forbidden: 403 POST https://bigquery.googleapis.com/bigquery/v2/projects/iceberg-bigquery-pipeline/jobs?prettyPrint=false: Access Denied: Table iceberg-bigquery-pipeline:staging.raw_pages: Permission bigquery.tables.updateData denied on table iceberg-bigquery-pipeline:staging.raw_pages (or it may not exist).
+
+```
+You need to add permission for SA account in Airflow to access BigQuery
+
+```
+export TUTORIAL_PROJECT="<your_project_name>"
+export TUTORIAL_COMPOSER_SA="composer-complaints@${TUTORIAL_PROJECT}.iam.gserviceaccount.com"
+
+# Allow Composer to submit BigQuery jobs.
+gcloud projects add-iam-policy-binding "$TUTORIAL_PROJECT" \
+  --member="serviceAccount:${TUTORIAL_COMPOSER_SA}" \
+  --role="roles/bigquery.jobUser" \
+  --condition=None
+
+# Allow Composer to read and update the pipeline datasets.
+for dataset in staging silver gold ops; do
+  bq --project_id="$TUTORIAL_PROJECT" \
+    --location="asia-southeast1" query \
+    --use_legacy_sql=false \
+    "GRANT \`roles/bigquery.dataEditor\`
+     ON SCHEMA \`${TUTORIAL_PROJECT}.${dataset}\`
+     TO \"serviceAccount:${TUTORIAL_COMPOSER_SA}\";" || break
+done
+```
+
+
 
 Each downstream task waits for its predecessor to finish. `max_active_runs=1` serializes this
 DAG, `schedule=None` keeps it manually triggered, and extraction IDs are stable across task
